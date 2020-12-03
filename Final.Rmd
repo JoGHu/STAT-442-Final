@@ -1,0 +1,587 @@
+---
+title: "Final"
+author: "Jordan Huitink"
+date: "10/26/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+#Data Gathering/Cleaning
+```{r}
+#Libraries
+library(ggplot2)
+library(dplyr)
+library(plotly)
+library(ggrepel)
+
+#Import Data
+seasons <- 2010:2020
+Complete <- purrr::map_df(seasons, function(x) {
+  readr::read_csv(
+    glue::glue("https://raw.githubusercontent.com/guga31bb/nflfastR-data/master/data/play_by_play_{x}.csv.gz")
+  )
+})
+
+#Select columns that you want
+Total <- subset(Complete, select = c("play_id", "game_id", "home_team", "away_team", "season_type", "week",
+                                  "posteam", "posteam_type", "defteam", "yardline_100",
+                                  "half_seconds_remaining", "game_half", "drive", "sp", "down", "ydstogo",
+                                  "desc", "play_type", "yards_gained", "shotgun", "pass_length", 
+                                  "pass_location", "air_yards", "yards_after_catch", "run_location",
+                                  "run_gap", "field_goal_result", "kick_distance", "total_home_score",
+                                  "total_away_score", "posteam_score", "defteam_score",
+                                  "score_differential",
+                                  "posteam_score_post", "defteam_score_post", "score_differential_post",
+                                  "first_down_rush", "first_down_pass", "first_down_penalty",
+                                  "third_down_converted", "third_down_failed", "fourth_down_converted",
+                                  "fourth_down_failed", "incomplete_pass", "interception",
+                                  "tackled_for_loss", "fumble_lost", "sack", "touchdown",
+                                  "drive_play_count", "drive_time_of_possession", "drive_first_downs",
+                                  "pass", "rush"))
+
+#Change data types
+Total$game_id <- as.factor(Total$game_id)
+Total$home_team <- as.factor(Total$home_team)
+Total$away_team <- as.factor(Total$away_team)
+Total$season_type <- as.factor(Total$season_type)
+Total$game_half <- as.factor(Total$game_half)
+Total$play_type <- as.factor(Total$play_type)
+Total$pass_length <- as.factor(Total$pass_length)
+Total$pass_location <- as.factor(Total$pass_location)
+Total$run_location <- as.factor(Total$run_location)
+Total$run_gap <- as.factor(Total$run_gap)
+
+#Create columns with if else statements
+Total$first_down <- ifelse(Total$first_down_pass == 1 |
+                             Total$first_down_rush == 1 |
+                             Total$first_down_penalty == 1,
+                           1,
+                           0)
+
+Total$turnover <- ifelse(Total$interception == 1 |
+                           Total$fumble_lost == 1,
+                         1,
+                         0)
+
+Total$penalty <- ifelse(grepl("PENALTY", Total$desc, fixed = TRUE) & Total$play_type == "no_play",
+                        1,
+                        0)
+
+Total$defteam.touchdown <- ifelse(Total$touchdown == 1 & 
+                                    Total$turnover == 1,
+                                  1, 
+                                  0)
+
+Total$touchdown <- ifelse(Total$defteam.touchdown == 1, 
+                          0, 
+                          Total$touchdown)
+
+#Filter out NA play types
+Total <- Total %>%
+  filter(!is.na(play_type))
+
+Total$fieldgoals <- ifelse(Total$field_goal_result == "made", 1, 0)
+
+Total$Year <- as.numeric(substr(Total$game_id, 1, 4))
+
+Total$Game_Status <- ifelse(Total$score_differential > 0,
+                            "Winning",
+                            ifelse(Total$score_differential == 0,
+                                   "Tied",
+                                   "Losing"))
+
+#Get play types. Use paste to combine two columns
+Total$run_type <- ifelse(Total$rush == 1, paste(Total$run_location, Total$run_gap), 0)
+
+Total$pass_type <- ifelse(Total$pass == 1, paste(Total$pass_length, Total$pass_location), 0)
+
+Total$run_type <- ifelse(Total$run_type == "middle NA", "middle", Total$run_type)
+
+Total$run_type <- ifelse(grepl('NA', Total$run_type, fixed = TRUE), 0, Total$run_type)
+
+Total$pass_type <- ifelse(grepl('NA', Total$pass_type, fixed = TRUE), 0, Total$pass_type)
+
+Total$run_type <- ifelse(Total$run_type == "middle end", 0, Total$run_type)
+
+```
+
+
+#Play by Play Shiny
+```{r}
+library(shiny)
+library(ggrepel)
+library(plotly)
+library(ggplot2)
+library(dplyr)
+
+ui <- fluidPage(    
+  
+  # Give the page a title
+  titlePanel("NFL Data"),
+  
+  # Generate a row with a sidebar
+  sidebarLayout(      
+    
+    # Define the sidebar with filters
+    sidebarPanel(
+      
+      #Time in half
+      selectInput("time",
+                "Time left in half",
+                choices = c("All", "First.Five.Min.of.Half", "Middle", "Last.Five.Min.of.Half")),
+      
+      #Distance to Endzone
+      textInput("yardline", 
+                "Yards to Endzone",
+                value = "All"),
+      
+      #Down
+      textInput("down", 
+                "Down",
+                value = "All"),
+      
+      #Distance to First Down
+      textInput("distance",
+                "Distance to First Down",
+                value = "All"),
+      
+      #Status of score for team with possession
+      selectInput("pd",
+                  "Game Status",
+                  choices = c("All", "Winning", "Losing", "Tied"))
+      
+      ),
+    
+    # Create a spot for the barplot
+    mainPanel(
+      h2(textOutput("Caption")),
+      
+      #Define Tabs in shiny app
+      tabsetPanel(
+        
+        tabPanel("Overall", verbatimTextOutput("Overall")),
+        
+        tabPanel("Pass", verbatimTextOutput("Passing")),
+        
+        tabPanel("Pass Type Dist", tableOutput("PassBreakdown")),
+        
+        tabPanel("Passing Yardage Dist", plotlyOutput("PlotPass")),
+        
+        tabPanel("Run", verbatimTextOutput("Running")),
+        
+        tabPanel("Run Type Dist", tableOutput("RunBreakdown")),
+        
+        tabPanel("Rushing Yardage Dist", plotlyOutput("Plotrun"))
+        )
+    )
+  )
+)
+
+  
+## Server
+
+# Define a server for the Shiny app
+server <- function(input, output) {
+  
+  #Reactive function to actively filter data
+  myData = reactive({
+    
+    Set <- Total 
+    
+    if(input$time == "First.Five.Min.of.Half")
+    {
+      Set <- Set %>%
+        filter(half_seconds_remaining >= 1500)
+    }
+    
+    if(input$time == "Middle")
+    {
+      Set <- Set %>%
+        filter(half_seconds_remaining <= 1500 & half_seconds_remaining >= 300)
+    }
+    
+    if(input$time == "Last.Five.Min.of.Half")
+    {
+      Set <- Set %>%
+        filter(half_seconds_remaining <= 300)
+    }
+    
+    if(input$yardline != "All")
+    {
+      Set <- Set %>%
+        filter(yardline_100 >= as.numeric(input$yardline) - 1 
+               & yardline_100 <= as.numeric(input$yardline) + 1)
+    }
+    
+    if(input$down != "All")
+    {
+      Set <- subset(Set, Set$down == as.numeric(input$down))
+    }
+    
+    if(input$distance != "All")
+    {
+      Set <- Set %>%
+        filter(ydstogo >= as.numeric(input$distance) - 1 
+               & ydstogo <= as.numeric(input$distance) + 1)
+    }
+    
+    if(input$pd != "All")
+    {
+      Set <- Set %>%
+        filter(Game_Status == input$pd)
+    }
+
+    return(Set)
+  })
+  
+  output$Overall = renderPrint({
+
+    Test <- myData()
+    
+    Runs <- Test %>%
+        filter(rush == 1)
+    
+    Pass <- Test %>%
+        filter(pass == 1)
+    
+    Plays <- Test %>%
+      filter(pass == 1 | rush == 1)
+    
+    #Use cat to combine multiple paste statements and separate them with '\n'
+      cat(paste("Number of Plays:", 
+            length(Plays$game_id)),
+            
+            paste("Expected Yards:", 
+            round(sum(Plays$yards_gained)/length(Plays$game_id), digits = 2)),
+          
+            paste("First Down Chance: ",
+            round(100*sum(Plays$first_down)/length(Plays$game_id), digits = 2), "%", sep = ""),
+            
+            paste("Run Chance: ", 
+            round(100*length(Runs$run_gap)/length(Plays$game_id), digits = 2), "%", sep = ""),
+            
+            paste("Pass Chance: ", 
+            round(100*length(Pass$pass_length)/length(Plays$game_id), digits = 2), "%", sep = ""),
+           
+            paste("Touchdown Chance: ", 
+            round(100*sum(Plays$touchdown)/length(Plays$game_id), digits = 2), "%", sep = ""), 
+          
+            paste("Penalty Chance: ", 
+            round(100*sum(Plays$penalty)/length(Plays$game_id), digits = 2), "%", sep = ""), 
+            
+            paste("Turnover Chance: ",
+            round(100*sum(Plays$turnover)/length(Plays$game_id), digits = 2), "%", sep = ""), sep = "\n")
+    
+  })
+  
+  
+
+
+  output$Running = renderPrint({
+
+    #Get only run plays
+      Runs <- myData() %>%
+        filter(rush == 1)
+      
+      
+        cat(paste("Number of Run Plays:", 
+            length(Runs$game_id)),
+      
+            paste("Expected Yards: ", 
+            round(sum(Runs$yards_gained)/length(Runs$game_id), digits = 2)),
+            
+            paste("First Down Chance: ",
+            round(100*sum(Runs$first_down)/length(Runs$game_id), digits = 2), "%", sep = ""),
+      
+            paste("Touchdown Chance: ",
+            round(100*sum(Runs$touchdown)/length(Runs$game_id), digits = 2), "%",  sep = ""), 
+            
+            paste("Penalty Chance: ",
+            round(100*sum(Runs$penalty)/length(Runs$game_id), digits = 2), "%", sep = ""),
+      
+            paste("Turnover Chance: ", 
+            round(100*sum(Runs$turnover)/length(Runs$game_id), digits = 2), "%", sep = ""), sep = "\n")
+
+  })
+        
+  
+   output$Passing = renderPrint({
+
+     #Get only Pass Plays
+      Pass <- myData() %>%
+        filter(pass == 1) 
+      
+            cat(paste("Number of Pass Plays:", 
+            length(Pass$game_id)),
+            
+            paste("Expected Yards ", 
+            round(sum(Pass$yards_gained)/length(Pass$game_id), digits = 2)),
+            
+            paste("Expected Yards in the Air ", 
+            round(sum(Pass$air_yards, na.rm = T)/length(Pass$game_id), digits = 2)),
+            
+            paste("Expected Yards After Catch", 
+            round(sum(Pass$yards_after_catch, na.rm = T)/length(Pass$game_id), digits = 2)),
+            
+            paste("First Down Chance: ",
+            round(100*sum(Pass$first_down)/length(Pass$game_id), digits = 2), "%", sep = ""),
+            
+            paste("Incompletion Chance ", 
+            round(100*sum(Pass$incomplete_pass)/length(Pass$game_id), digits = 2), "%",sep = ""), 
+            
+            paste("Sack Chance ", 
+            round(100*sum(Pass$sack)/length(Pass$game_id), digits = 2), "%",sep = ""), 
+            
+            paste("Penalty Chance ", 
+            round(100*sum(Pass$penalty)/length(Pass$game_id), digits = 2), "%",sep = ""),
+            
+            paste("Touchdown Chance ",
+            round(100*sum(Pass$touchdown)/length(Pass$game_id), digits = 2), "%", sep = ""), 
+                  
+            paste("Turnover Chance ", 
+            round(100*sum(Pass$turnover)/length(Pass$game_id), digits = 2), "%", sep = ""), sep = "\n")
+   })
+   
+  output$PlotPass = renderPlotly({
+    
+    #Filter yards so outliers don't affect chart
+    Pass <- myData() %>%
+        filter(pass_type != 0, yards_gained >= -5, yards_gained <= 50)
+    
+    #Order factors
+    Pass$pass_type <- factor(Pass$pass_type, levels = c(
+                                                        "deep left",
+                                                        "deep middle",
+                                                        "deep right",
+                                                        "short left",
+                                                        "short middle",
+                                                        "short right"))
+    
+    #Store ggplot into variable p to then use in ggplotly. Can filter data in ggplot definition.
+    p <- ggplot(data = Pass, 
+                mapping = aes(
+                              x = pass_type,
+                              y = yards_gained)) +
+       geom_violin() +
+       theme_classic() +
+       theme(panel.background = element_rect(fill = "springgreen4"))+
+        ylab("Yards")
+    
+    ggplotly(p)
+    
+  })
+   
+  
+  output$Plotrun = renderPlotly({
+    
+    #Filter yards so outliers don't affect chart
+    Runs <- myData() %>%
+        filter(run_type != 0, yards_gained >= -10, yards_gained <= 32) 
+    
+    #Order factors
+    Runs$run_type <- factor(Runs$run_type, levels = c(
+                                                      "left end",
+                                                      "left tackle",
+                                                      "left guard",
+                                                      "middle",
+                                                      "right guard",
+                                                      "right tackle",
+                                                      "right end")
+                            )
+    
+    #Store ggplot into variable p to then use in ggplotly. Can filter data in ggplot definition.
+    p <- ggplot(data = Runs, 
+                mapping = aes(
+                              x = run_type,
+                              y = yards_gained)) +
+       geom_violin() +
+       theme_classic() +
+       theme(panel.background = element_rect(fill = "springgreen4"))+
+        ylab("Yards")
+    
+    ggplotly(p)
+    
+  })
+  
+  output$RunBreakdown = renderTable({
+    
+    Runs <- myData() %>%
+        filter(run_type != 0) 
+    
+    #Order factors
+    Runs$run_type <- factor(Runs$run_type, levels = c(
+                                                      "left end",
+                                                      "left tackle",
+                                                      "left guard",
+                                                      "middle",
+                                                      "right guard",
+                                                      "right tackle",
+                                                      "right end")
+                            )
+    
+    group_by(Runs, run_type) %>%
+      summarise(
+        count = n(),
+        First.Pct = mean(first_down, na.rm = TRUE),
+        TD.Pct = mean(touchdown, na.rm = TRUE),
+        Turnover.Pct = mean(turnover, na.rm = TRUE),
+        Avg.Yards = mean(yards_gained, na.rm = TRUE),
+        sd.Yards = sd(yards_gained, na.rm = TRUE)
+      )
+    
+  })
+  
+    output$PassBreakdown = renderTable({
+      
+    Pass <- myData() %>%
+        filter(pass_type != 0)
+    
+    #Order factors
+    Pass$pass_type <- factor(Pass$pass_type, levels = c(
+                                                        "deep left",
+                                                        "deep middle",
+                                                        "deep right",
+                                                        "short left",
+                                                        "short middle",
+                                                        "short right"))
+    
+    #Use group_by(data, other stuff) to get output. Don't need data %>%
+    group_by(Pass, pass_type) %>%
+      summarise(
+        count = n(),
+        First.Pct = mean(first_down, na.rm = TRUE),
+        TD.Pct = mean(touchdown, na.rm = TRUE),
+        Incomplete.Pct = mean(incomplete_pass, na.rm = TRUE),
+        Turnover.Pct = mean(turnover, na.rm = TRUE),
+        Avg.Yards = mean(yards_gained, na.rm = TRUE),
+        sd.Yards = sd(yards_gained, na.rm = TRUE)
+      )
+      
+  })
+  
+  
+  }
+
+shinyApp(ui, server)
+```
+
+
+#GIF Creation
+```{r}
+library(dplyr)
+library(ggplot2)
+library(gganimate)
+
+#Subset data and filter it to get data we want.
+Subset <- Total %>%
+  filter(run_gap != 'NA') %>%
+  group_by(yardline_100) %>%
+  count(run_gap)
+
+Subset <- Subset %>%
+            group_by(yardline_100) %>%
+            mutate(countT= sum(n)) %>%
+            group_by(run_gap, add=TRUE) %>%
+            mutate(per=(round(100*n/countT,2)))
+
+#Create the plot for annimation
+p <- ggplot(Subset, aes(x = yardline_100, y = per, group = run_gap, color = run_gap)) +
+  geom_line(size = 2)+
+  geom_point(size = 4)+
+  theme_bw() +
+  labs(
+    title = "Run Type by Yard line",
+    x = "Yard Line",
+    y = "Percent",
+    color = NULL
+  )+
+  scale_color_brewer(palette="Set1")+
+  transition_reveal(yardline_100)
+
+#Create annimation
+library(gifski)
+library(png)
+animate(p, nframes = 350,fps = 25,  width = 1200, height = 1000, 
+        renderer = gifski_renderer("lineplot.gif"))
+
+```
+
+
+#Play Type by week
+```{r}
+Subset <- Complete %>%
+  filter(play_type == "pass" | play_type == "run") %>%
+  group_by(week) %>%
+  count(play_type)
+
+#identity to get y variable for geom_bar
+ggplot(data = Subset, mapping = aes(x = week, y = n, fill = play_type))+
+  geom_bar(stat = 'identity', position = "fill")
+  
+```
+
+
+#Play Type by Yardline
+```{r}
+#Use count to get counts for group
+Subset <- Complete %>%
+  filter(play_type == "pass" | play_type == "run") %>%
+  group_by(yardline_100) %>%
+  count(play_type)
+
+ggplot(data = Subset, mapping = aes(x = yardline_100, y = n, fill = play_type))+
+  geom_bar(stat = 'identity', position = "fill")
+```
+
+
+#Check validity for tests
+```{r}
+library(ggpubr)
+library(rstatix)
+
+Subset <- Complete %>%
+  filter(play_type == "pass" | play_type == "run")
+
+#density plot for yards 
+ggplot(data = Subset, mapping = aes(x = yards_gained, fill = play_type))+
+  geom_density(alpha = 0.3)
+
+#qqplot for yards
+qqnorm(Subset$yards_gained)
+qqline(Subset$yards_gained)
+
+#get means and standard deviations
+Subset %>%
+  group_by(play_type) %>%
+  get_summary_stats(yards_gained, type = "mean_sd")
+
+#t test to check difference in yards by play type
+t.test(Subset$yards_gained ~ Subset$play_type)
+
+#Wilcox test to double check
+wilcox.test(Subset$yards_gained ~ Subset$play_type)
+```
+
+```{r}
+Subset <- Total %>%
+  filter(play_type == "pass" | play_type == "run") %>%
+  group_by(yardline_100, play_type) %>%
+  summarise(turnover = mean(turnover))
+
+#Create the plot for annimation
+ggplot(Subset, aes(x = yardline_100, y = turnover, group = play_type, color = play_type)) +
+  geom_line(size = 1)+
+  theme_bw() +
+  labs(
+    title = "Turnover Chance by Play Type by Yard line",
+    x = "Yard Line",
+    y = "Turnover Chance",
+    color = NULL
+  )+
+  scale_color_brewer(palette="Set1")
+```
+
